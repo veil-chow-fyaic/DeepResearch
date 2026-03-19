@@ -1,0 +1,207 @@
+"""
+DeepResearch Agent - OpenRouter API Version
+根据 README 修改，支持通过 OpenRouter 调用 Tongyi-DeepResearch-30B-A3B
+"""
+import json
+import json5
+import os
+from typing import Dict, List, Optional, Union
+from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
+from datetime import datetime
+import time
+import asyncio
+import random
+
+from prompt import *
+from tool_file import *
+from tool_scholar import *
+from tool_python import *
+from tool_search import *
+from tool_visit import *
+
+MAX_LLM_CALL_PER_RUN = int(os.getenv('MAX_LLM_CALL_PER_RUN', 100))
+
+TOOL_CLASS = [
+    FileParser(),
+    Scholar(),
+    Visit(),
+    Search(),
+    PythonInterpreter(),
+]
+TOOL_MAP = {tool.name: tool for tool in TOOL_CLASS}
+
+
+def today_date():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+class OpenRouterReactAgent:
+    """使用 OpenRouter API 的 DeepResearch Agent"""
+
+    def __init__(self, llm_cfg: dict):
+        self.llm_generate_cfg = llm_cfg.get("generate_cfg", {})
+        self.model = llm_cfg.get("model", "alibaba/tongyi-deepresearch-30b-a3b")
+
+        # OpenRouter 配置
+        self.api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable is required")
+
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=600.0,
+        )
+        print(f"Initialized OpenRouter client with model: {self.model}")
+
+    def call_server(self, msgs, max_tries=10):
+        """调用 OpenRouter API"""
+        base_sleep_time = 1
+        for attempt in range(max_tries):
+            try:
+                print(f"--- Attempt {attempt + 1}/{max_tries} ---")
+
+                chat_response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=msgs,
+                    temperature=self.llm_generate_cfg.get('temperature', 0.6),
+                    top_p=self.llm_generate_cfg.get('top_p', 0.95),
+                    max_tokens=10000,
+                )
+
+                content = chat_response.choices[0].message.content
+
+                # OpenRouter 可能返回 reasoning 字段
+                try:
+                    reasoning = getattr(chat_response.choices[0].message, 'reasoning', None)
+                    if reasoning:
+                        content = "<think\\>\n" + reasoning.strip() + "\n</think\\>\n" + content
+                except:
+                    pass
+
+                if content and content.strip():
+                    print("--- Service call successful ---")
+                    return content.strip()
+                else:
+                    print(f"Warning: Empty response on attempt {attempt + 1}")
+
+            except (APIError, APIConnectionError, APITimeoutError) as e:
+                print(f"API Error on attempt {attempt + 1}: {e}")
+            except Exception as e:
+                print(f"Unexpected error on attempt {attempt + 1}: {e}")
+
+            if attempt < max_tries - 1:
+                sleep_time = min(base_sleep_time * (2 ** attempt) + random.uniform(0, 1), 30)
+                print(f"Retrying in {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
+
+        return "Server error: All retries exhausted"
+
+    def custom_call_tool(self, tool_name: str, tool_args: dict, **kwargs):
+        """调用工具"""
+        if tool_name in TOOL_MAP:
+            tool_args["params"] = tool_args
+            if "python" in tool_name.lower():
+                result = TOOL_MAP['PythonInterpreter'].call(tool_args)
+            elif tool_name == "parse_file":
+                params = {"files": tool_args["files"]}
+                raw_result = asyncio.run(TOOL_MAP[tool_name].call(params, file_root_path="./eval_data/file_corpus"))
+                result = raw_result
+                if not isinstance(raw_result, str):
+                    result = str(raw_result)
+            else:
+                raw_result = TOOL_MAP[tool_name].call(tool_args, **kwargs)
+                result = raw_result
+            return result
+        else:
+            return f"Error: Tool {tool_name} not found"
+
+    def _run(self, data: dict, **kwargs) -> dict:
+        """执行深度研究任务"""
+        try:
+            question = data['item']['question']
+        except:
+            raw_msg = data['item']['messages'][1]["content"]
+            question = raw_msg.split("User:")[1].strip() if "User:" in raw_msg else raw_msg
+
+        start_time = time.time()
+        answer = data['item'].get('answer', '')
+
+        system_prompt = SYSTEM_PROMPT + today_date()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ]
+
+        num_llm_calls_available = MAX_LLM_CALL_PER_RUN
+        round_num = 0
+
+        while num_llm_calls_available > 0:
+            # 超时检查
+            if time.time() - start_time > 150 * 60:
+                return {
+                    "question": question,
+                    "answer": answer,
+                    "messages": messages,
+                    "prediction": "Timeout after 2h30m",
+                    "termination": "timeout"
+                }
+
+            round_num += 1
+            num_llm_calls_available -= 1
+            content = self.call_server(messages)
+
+            print(f'Round {round_num}: {content[:500]}...' if len(content) > 500 else f'Round {round_num}: {content}')
+
+            messages.append({"role": "assistant", "content": content.strip()})
+
+            # 检查工具调用
+            if 'Action:' in content and 'Action Input:' in content:
+                try:
+                    action_start = content.find("Action:") + len("Action:")
+                    action_end = content.find("Action Input:")
+                    tool_name = content[action_start:action_end].strip()
+
+                    input_start = content.find("Action Input:") + len("Action Input:")
+                    input_end = content.find("Observation:") if "Observation:" in content else len(content)
+                    tool_input_str = content[input_start:input_end].strip()
+
+                    try:
+                        tool_args = json5.loads(tool_input_str)
+                    except:
+                        tool_args = {"query": tool_input_str}
+
+                    result = self.custom_call_tool(tool_name, tool_args)
+                    observation = f"Observation: {result}"
+                    messages.append({"role": "user", "content": observation})
+
+                except Exception as e:
+                    messages.append({"role": "user", "content": f"Observation: Tool call error: {e}"})
+
+            # 检查答案
+            if '<answer>' in content and '</answer>' in content:
+                prediction = content.split('<answer>')[1].split('</answer>')[0]
+                return {
+                    "question": question,
+                    "answer": answer,
+                    "messages": messages,
+                    "prediction": prediction,
+                    "termination": "answer"
+                }
+
+            if num_llm_calls_available <= 0:
+                messages[-1]['content'] = 'LLM call limit reached. Please provide your best answer.'
+
+        prediction = "No answer found"
+        if "<answer>" in messages[-1]["content"]:
+            prediction = messages[-1]["content"].split("<answer>")[1].split("</answer>")[0]
+
+        return {
+            "question": question,
+            "answer": answer,
+            "messages": messages,
+            "prediction": prediction,
+            "termination": "max_calls"
+        }
