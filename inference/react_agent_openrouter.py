@@ -13,21 +13,34 @@ import asyncio
 import random
 
 from prompt import *
-from tool_file import *
-from tool_scholar import *
-from tool_python import *
-from tool_search import *
-from tool_visit import *
+from tool_file import FileParser
+from tool_scholar import Scholar
+from tool_search import Search
+from tool_visit import Visit
 
 MAX_LLM_CALL_PER_RUN = int(os.getenv('MAX_LLM_CALL_PER_RUN', 100))
 
-TOOL_CLASS = [
-    FileParser(),
-    Scholar(),
-    Visit(),
-    Search(),
-    PythonInterpreter(),
-]
+ENABLE_PYTHON_INTERPRETER = os.getenv("ENABLE_PYTHON_INTERPRETER", "").strip().lower() in {"1", "true", "yes"}
+
+
+def build_tool_class():
+    tools = [
+        FileParser(),
+        Scholar(),
+        Visit(),
+        Search(),
+    ]
+    if ENABLE_PYTHON_INTERPRETER:
+        try:
+            from tool_python import PythonInterpreter, SANDBOX_FUSION_IMPORT_ERROR
+            if SANDBOX_FUSION_IMPORT_ERROR is None:
+                tools.append(PythonInterpreter())
+        except Exception:
+            pass
+    return tools
+
+
+TOOL_CLASS = build_tool_class()
 TOOL_MAP = {tool.name: tool for tool in TOOL_CLASS}
 
 

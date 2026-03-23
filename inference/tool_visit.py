@@ -11,7 +11,6 @@ from openai import OpenAI
 import random
 from urllib.parse import urlparse, unquote
 import time 
-from transformers import AutoTokenizer
 import tiktoken
 
 VISIT_SERVER_TIMEOUT = int(os.getenv("VISIT_SERVER_TIMEOUT", 200))

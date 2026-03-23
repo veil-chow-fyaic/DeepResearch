@@ -6,7 +6,7 @@ import concurrent.futures
 from tqdm import tqdm
 import threading
 from datetime import datetime
-from react_agent import MultiTurnReactAgent
+from react_agent import MultiTurnReactAgent, TOOL_CLASS
 import time
 import math
 
@@ -22,6 +22,13 @@ if __name__ == "__main__":
     parser.add_argument("--roll_out_count", type=int, default=3)
     parser.add_argument("--total_splits", type=int, default=1)
     parser.add_argument("--worker_split", type=int, default=1)
+    parser.add_argument("--min_rounds", type=int, default=int(os.getenv("DEEP_RESEARCH_MIN_ROUNDS", 8)))
+    parser.add_argument("--min_tool_calls", type=int, default=int(os.getenv("DEEP_RESEARCH_MIN_TOOL_CALLS", 8)))
+    parser.add_argument("--min_search_calls", type=int, default=int(os.getenv("DEEP_RESEARCH_MIN_SEARCH_CALLS", 3)))
+    parser.add_argument("--min_visit_calls", type=int, default=int(os.getenv("DEEP_RESEARCH_MIN_VISIT_CALLS", 3)))
+    parser.add_argument("--min_scholar_calls", type=int, default=int(os.getenv("DEEP_RESEARCH_MIN_SCHOLAR_CALLS", 0)))
+    parser.add_argument("--reflection_interval", type=int, default=int(os.getenv("DEEP_RESEARCH_REFLECTION_INTERVAL", 3)))
+    parser.add_argument("--max_minutes", type=int, default=int(os.getenv("DEEP_RESEARCH_MAX_MINUTES", 150)))
     args = parser.parse_args()
 
     model = args.model
@@ -36,9 +43,10 @@ if __name__ == "__main__":
         exit(1)
 
     model_name = os.path.basename(model.rstrip('/'))
+    dataset_name = os.path.splitext(os.path.basename(args.dataset))[0]
 
     model_dir = os.path.join(output_base, f"{model_name}_sglang")
-    dataset_dir = os.path.join(model_dir, args.dataset)
+    dataset_dir = os.path.join(model_dir, dataset_name)
 
     os.makedirs(dataset_dir, exist_ok=True)
 
@@ -47,6 +55,16 @@ if __name__ == "__main__":
     print(f"Output directory: {dataset_dir}")
     print(f"Number of rollouts: {roll_out_count}")
     print(f"Data splitting: {worker_split}/{total_splits}")
+    print(
+        "Research profile: "
+        f"min_rounds={args.min_rounds}, "
+        f"min_tool_calls={args.min_tool_calls}, "
+        f"min_search_calls={args.min_search_calls}, "
+        f"min_visit_calls={args.min_visit_calls}, "
+        f"min_scholar_calls={args.min_scholar_calls}, "
+        f"reflection_interval={args.reflection_interval}, "
+        f"max_minutes={args.max_minutes}"
+    )
 
     data_filepath = f"{args.dataset}"
     try:
@@ -159,14 +177,21 @@ if __name__ == "__main__":
                 'max_retries': 10,
                 'temperature': args.temperature,
                 'top_p': args.top_p,
-                'presence_penalty': args.presence_penalty
+                'presence_penalty': args.presence_penalty,
+                'min_rounds': args.min_rounds,
+                'min_tool_calls': args.min_tool_calls,
+                'min_search_calls': args.min_search_calls,
+                'min_visit_calls': args.min_visit_calls,
+                'min_scholar_calls': args.min_scholar_calls,
+                'reflection_interval': args.reflection_interval,
+                'max_minutes': args.max_minutes,
             },
             'model_type': 'qwen_dashscope'
         }
 
         test_agent = MultiTurnReactAgent(
             llm=llm_cfg,
-            function_list=["search", "visit", "google_scholar", "PythonInterpreter"]
+            function_list=[tool.name for tool in TOOL_CLASS]
         )
 
         write_locks = {i: threading.Lock() for i in range(1, roll_out_count + 1)}
