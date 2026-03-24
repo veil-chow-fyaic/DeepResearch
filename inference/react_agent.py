@@ -322,7 +322,7 @@ class MultiTurnReactAgent(FnCallAgent):
             if (
                 requirements_met
                 and '<answer>' not in content
-                and num_llm_calls_available == 1
+                and num_llm_calls_available <= 1
             ):
                 messages.append({"role": "user", "content": self.build_force_answer_message()})
 
@@ -352,6 +352,12 @@ class MultiTurnReactAgent(FnCallAgent):
                     "research_config": self.research_config,
                 }
                 return result
+
+        requirements_met, _ = self.research_requirements_met(research_state)
+        if '<answer>' not in messages[-1]['content'] and requirements_met:
+            content = self.call_server(messages + [{"role": "user", "content": self.build_force_answer_message()}], planning_port)
+            messages.append({"role": "user", "content": self.build_force_answer_message()})
+            messages.append({"role": "assistant", "content": content.strip()})
 
         if '<answer>' in messages[-1]['content']:
             prediction = messages[-1]['content'].split('<answer>')[1].split('</answer>')[0]

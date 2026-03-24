@@ -3,12 +3,20 @@ from typing import Dict, List, Optional, Union, Any
 import json5
 from qwen_agent.tools.base import BaseToolWithFileAccess, register_tool
 from qwen_agent.utils.utils import extract_code
-from sandbox_fusion import run_code, RunCodeRequest, RunStatus
 from requests.exceptions import Timeout
 import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    from sandbox_fusion import run_code, RunCodeRequest, RunStatus
+    SANDBOX_FUSION_IMPORT_ERROR = None
+except Exception as exc:
+    run_code = None
+    RunCodeRequest = None
+    RunStatus = None
+    SANDBOX_FUSION_IMPORT_ERROR = exc
 CHINESE_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
 
 
@@ -70,6 +78,9 @@ class PythonInterpreter(BaseToolWithFileAccess):
         }
 
     def call(self, params, files= None, timeout = 50, **kwargs) -> str:
+        if SANDBOX_FUSION_IMPORT_ERROR is not None or not SANDBOX_FUSION_ENDPOINTS:
+            detail = str(SANDBOX_FUSION_IMPORT_ERROR) if SANDBOX_FUSION_IMPORT_ERROR is not None else "SANDBOX_FUSION_ENDPOINT is not configured"
+            return f"[Python Interpreter Error]: Python sandbox is unavailable. {detail}"
         try:
             code=params
             last_error = None
@@ -113,6 +124,8 @@ class PythonInterpreter(BaseToolWithFileAccess):
 
     def call_specific_endpoint(self, params: Union[str, dict], endpoint: str, timeout: Optional[int] = 30, **kwargs) -> tuple:
         """Test a specific endpoint directly"""
+        if SANDBOX_FUSION_IMPORT_ERROR is not None:
+            return False, f'[Python Interpreter Error]: Python sandbox is unavailable. {SANDBOX_FUSION_IMPORT_ERROR}', None
         try:
             if type(params) is str:
                 params = json5.loads(params)
