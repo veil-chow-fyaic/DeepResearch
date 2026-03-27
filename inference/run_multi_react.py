@@ -47,8 +47,12 @@ if __name__ == "__main__":
 
     model_dir = os.path.join(output_base, f"{model_name}_sglang")
     dataset_dir = os.path.join(model_dir, dataset_name)
+    artifact_dir = os.path.join(dataset_dir, "artifacts")
 
     os.makedirs(dataset_dir, exist_ok=True)
+    os.makedirs(artifact_dir, exist_ok=True)
+    os.environ.setdefault("DEEP_RESEARCH_KEEP_MESSAGES", "0")
+    os.environ["DEEP_RESEARCH_RESULT_ARTIFACT_DIR"] = artifact_dir
 
     print(f"Model name: {model_name}")
     print(f"Data set path: {args.dataset}")

@@ -53,6 +53,10 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(args.output, f"results_{timestamp}.jsonl")
+    artifact_dir = os.path.join(args.output, f"artifacts_{timestamp}")
+    os.makedirs(artifact_dir, exist_ok=True)
+    os.environ.setdefault("DEEP_RESEARCH_KEEP_MESSAGES", "0")
+    os.environ["DEEP_RESEARCH_RESULT_ARTIFACT_DIR"] = artifact_dir
 
     # 加载数据
     print(f"Loading: {args.dataset}")

@@ -1,6 +1,7 @@
 import json
 import json5
 import os
+import hashlib
 from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union
 from qwen_agent.llm.schema import Message
 from qwen_agent.utils.utils import build_text_completion_prompt
@@ -29,6 +30,8 @@ MAX_LLM_CALL_PER_RUN = int(os.getenv('MAX_LLM_CALL_PER_RUN', 100))
 
 USE_OPENROUTER = bool(os.getenv("OPENROUTER_API_KEY", "").strip() and os.getenv("OPENROUTER_BASE_URL", "").strip())
 ENABLE_PYTHON_INTERPRETER = os.getenv("ENABLE_PYTHON_INTERPRETER", "").strip().lower() in {"1", "true", "yes"}
+KEEP_FULL_MESSAGES = os.getenv("DEEP_RESEARCH_KEEP_MESSAGES", "").strip().lower() in {"1", "true", "yes"}
+RESULT_ARTIFACT_DIR = os.getenv("DEEP_RESEARCH_RESULT_ARTIFACT_DIR", "").strip()
 
 
 def build_tool_class() -> List[BaseTool]:
@@ -168,6 +171,37 @@ class MultiTurnReactAgent(FnCallAgent):
             "scholar_calls": 0,
         }
 
+    def _persist_message_artifact(self, question: str, messages: List[dict]) -> str:
+        if not RESULT_ARTIFACT_DIR:
+            return ""
+        try:
+            os.makedirs(RESULT_ARTIFACT_DIR, exist_ok=True)
+            question_hash = hashlib.sha1((question or "").encode("utf-8")).hexdigest()[:12]
+            artifact_path = os.path.join(RESULT_ARTIFACT_DIR, f"{question_hash}.messages.json")
+            with open(artifact_path, "w", encoding="utf-8") as f:
+                json.dump(messages, f, ensure_ascii=False, indent=2)
+            return artifact_path
+        except Exception:
+            return ""
+
+    def _build_result(self, question: str, answer: str, messages: List[dict], prediction: str, termination: str, research_state: Dict) -> Dict:
+        artifact_path = self._persist_message_artifact(question, messages)
+        compact_research_state = dict(research_state or {})
+        compact_research_state["messages_count"] = len(messages or [])
+        if artifact_path:
+            compact_research_state["messages_artifact"] = artifact_path
+        result = {
+            "question": question,
+            "answer": answer,
+            "prediction": prediction,
+            "termination": termination,
+            "research_state": compact_research_state,
+            "research_config": self.research_config,
+        }
+        if KEEP_FULL_MESSAGES:
+            result["messages"] = messages
+        return result
+
     def update_research_state(self, state: Dict, tool_name: str):
         state["tool_calls"] += 1
         if tool_name == "search":
@@ -259,16 +293,7 @@ class MultiTurnReactAgent(FnCallAgent):
             if time.time() - start_time > self.research_config["max_minutes"] * 60:
                 prediction = 'No answer found after 2h30mins'
                 termination = 'No answer found after 2h30mins'
-                result = {
-                    "question": question,
-                    "answer": answer,
-                    "messages": messages,
-                    "prediction": prediction,
-                    "termination": termination,
-                    "research_state": research_state,
-                    "research_config": self.research_config,
-                }
-                return result
+                return self._build_result(question, answer, messages, prediction, termination, research_state)
             round += 1
             research_state["rounds"] = round
             num_llm_calls_available -= 1
@@ -342,16 +367,7 @@ class MultiTurnReactAgent(FnCallAgent):
                 else:
                     prediction = messages[-1]['content']
                     termination = 'format error: generate an answer as token limit reached'
-                result = {
-                    "question": question,
-                    "answer": answer,
-                    "messages": messages,
-                    "prediction": prediction,
-                    "termination": termination,
-                    "research_state": research_state,
-                    "research_config": self.research_config,
-                }
-                return result
+                return self._build_result(question, answer, messages, prediction, termination, research_state)
 
         requirements_met, _ = self.research_requirements_met(research_state)
         if '<answer>' not in messages[-1]['content'] and requirements_met:
@@ -367,16 +383,7 @@ class MultiTurnReactAgent(FnCallAgent):
             termination = 'answer not found'
             if num_llm_calls_available == 0:
                 termination = 'exceed available llm calls'
-        result = {
-            "question": question,
-            "answer": answer,
-            "messages": messages,
-            "prediction": prediction,
-            "termination": termination,
-            "research_state": research_state,
-            "research_config": self.research_config,
-        }
-        return result
+        return self._build_result(question, answer, messages, prediction, termination, research_state)
 
     def custom_call_tool(self, tool_name: str, tool_args: dict, **kwargs):
         if tool_name in TOOL_MAP:

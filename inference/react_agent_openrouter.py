@@ -5,6 +5,7 @@ DeepResearch Agent - OpenRouter API Version
 import json
 import json5
 import os
+import hashlib
 from typing import Dict, List, Optional, Union
 from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 from datetime import datetime
@@ -21,6 +22,8 @@ from tool_visit import Visit
 MAX_LLM_CALL_PER_RUN = int(os.getenv('MAX_LLM_CALL_PER_RUN', 100))
 
 ENABLE_PYTHON_INTERPRETER = os.getenv("ENABLE_PYTHON_INTERPRETER", "").strip().lower() in {"1", "true", "yes"}
+KEEP_FULL_MESSAGES = os.getenv("DEEP_RESEARCH_KEEP_MESSAGES", "").strip().lower() in {"1", "true", "yes"}
+RESULT_ARTIFACT_DIR = os.getenv("DEEP_RESEARCH_RESULT_ARTIFACT_DIR", "").strip()
 
 
 def build_tool_class():
@@ -131,6 +134,35 @@ class OpenRouterReactAgent:
         else:
             return f"Error: Tool {tool_name} not found"
 
+    def _persist_message_artifact(self, question: str, messages: list[dict]) -> str:
+        if not RESULT_ARTIFACT_DIR:
+            return ""
+        try:
+            os.makedirs(RESULT_ARTIFACT_DIR, exist_ok=True)
+            question_hash = hashlib.sha1((question or "").encode("utf-8")).hexdigest()[:12]
+            artifact_path = os.path.join(RESULT_ARTIFACT_DIR, f"{question_hash}.messages.json")
+            with open(artifact_path, "w", encoding="utf-8") as f:
+                json.dump(messages, f, ensure_ascii=False, indent=2)
+            return artifact_path
+        except Exception:
+            return ""
+
+    def _build_result(self, question: str, answer: str, messages: list[dict], prediction: str, termination: str) -> dict:
+        artifact_path = self._persist_message_artifact(question, messages)
+        result = {
+            "question": question,
+            "answer": answer,
+            "prediction": prediction,
+            "termination": termination,
+            "research_state": {
+                "messages_count": len(messages or []),
+                **({"messages_artifact": artifact_path} if artifact_path else {}),
+            },
+        }
+        if KEEP_FULL_MESSAGES:
+            result["messages"] = messages
+        return result
+
     def _run(self, data: dict, **kwargs) -> dict:
         """执行深度研究任务"""
         try:
@@ -154,13 +186,7 @@ class OpenRouterReactAgent:
         while num_llm_calls_available > 0:
             # 超时检查
             if time.time() - start_time > 150 * 60:
-                return {
-                    "question": question,
-                    "answer": answer,
-                    "messages": messages,
-                    "prediction": "Timeout after 2h30m",
-                    "termination": "timeout"
-                }
+                return self._build_result(question, answer, messages, "Timeout after 2h30m", "timeout")
 
             round_num += 1
             num_llm_calls_available -= 1
@@ -196,13 +222,7 @@ class OpenRouterReactAgent:
             # 检查答案
             if '<answer>' in content and '</answer>' in content:
                 prediction = content.split('<answer>')[1].split('</answer>')[0]
-                return {
-                    "question": question,
-                    "answer": answer,
-                    "messages": messages,
-                    "prediction": prediction,
-                    "termination": "answer"
-                }
+                return self._build_result(question, answer, messages, prediction, "answer")
 
             if num_llm_calls_available <= 0:
                 messages[-1]['content'] = 'LLM call limit reached. Please provide your best answer.'
@@ -211,10 +231,4 @@ class OpenRouterReactAgent:
         if "<answer>" in messages[-1]["content"]:
             prediction = messages[-1]["content"].split("<answer>")[1].split("</answer>")[0]
 
-        return {
-            "question": question,
-            "answer": answer,
-            "messages": messages,
-            "prediction": prediction,
-            "termination": "max_calls"
-        }
+        return self._build_result(question, answer, messages, prediction, "max_calls")
