@@ -10,6 +10,37 @@ from react_agent import MultiTurnReactAgent, TOOL_CLASS
 import time
 import math
 
+
+STATUS_FILE = os.getenv("DEEP_RESEARCH_STATUS_FILE", "").strip()
+
+
+def write_status(phase, message="", progress=None, last_error=""):
+    if not STATUS_FILE:
+        return
+    try:
+        now = datetime.now().isoformat()
+        payload = {
+            "phase": phase,
+            "message": message,
+            "progress": progress or {},
+            "last_error": last_error,
+            "updated_at": now,
+        }
+        if os.path.exists(STATUS_FILE):
+            try:
+                with open(STATUS_FILE, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                payload["started_at"] = existing.get("started_at", now)
+            except Exception:
+                payload["started_at"] = now
+        else:
+            payload["started_at"] = now
+        os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="")
@@ -53,6 +84,16 @@ if __name__ == "__main__":
     os.makedirs(artifact_dir, exist_ok=True)
     os.environ.setdefault("DEEP_RESEARCH_KEEP_MESSAGES", "0")
     os.environ["DEEP_RESEARCH_RESULT_ARTIFACT_DIR"] = artifact_dir
+    write_status(
+        "running",
+        "外部 deepresearch 任务已启动",
+        {
+            "dataset": args.dataset,
+            "roll_out_count": roll_out_count,
+            "max_workers": args.max_workers,
+            "max_minutes": args.max_minutes,
+        },
+    )
 
     print(f"Model name: {model_name}")
     print(f"Data set path: {args.dataset}")
@@ -103,6 +144,16 @@ if __name__ == "__main__":
 
     print(f"Total items in dataset: {total_items}")
     print(f"Processing items {start_idx} to {end_idx-1} ({len(items)} items)")
+    write_status(
+        "running",
+        "外部 deepresearch 已完成数据装载，准备执行 rollouts",
+        {
+            "total_items": total_items,
+            "split_items": len(items),
+            "worker_split": worker_split,
+            "total_splits": total_splits,
+        },
+    )
 
     if total_splits > 1:
         # Add split suffix to output files when using splits
@@ -173,6 +224,11 @@ if __name__ == "__main__":
 
     if not tasks_to_run_all:
         print("All rollouts have been completed and no execution is required.")
+        write_status(
+            "completed",
+            "无需执行 rollouts，外部 deepresearch 任务直接完成",
+            {"total_tasks": 0},
+        )
     else:
         llm_cfg = {
             'model': model,
@@ -208,6 +264,13 @@ if __name__ == "__main__":
                     model
                 ): task for task in tasks_to_run_all
             }
+            completed_tasks = 0
+            total_tasks = len(tasks_to_run_all)
+            write_status(
+                "running",
+                "外部 deepresearch 正在执行 rollouts",
+                {"completed_tasks": 0, "total_tasks": total_tasks},
+            )
 
             for future in tqdm(as_completed(future_to_task), total=len(tasks_to_run_all), desc="Processing All Rollouts"):
                 task_info = future_to_task[future]
@@ -215,6 +278,16 @@ if __name__ == "__main__":
                 output_file = output_files[rollout_idx]
                 try:
                     result = future.result()
+                    completed_tasks += 1
+                    write_status(
+                        "running",
+                        "外部 deepresearch 正在处理 rollouts",
+                        {
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                            "last_rollout_idx": rollout_idx,
+                        },
+                    )
                     with write_locks[rollout_idx]:
                         with open(output_file, "a", encoding="utf-8") as f:
                             f.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -234,6 +307,15 @@ if __name__ == "__main__":
                     with write_locks[rollout_idx]:
                         with open(output_file, "a", encoding="utf-8") as f:
                             f.write(json.dumps(error_result, ensure_ascii=False) + "\n")
+                    write_status(
+                        "failed",
+                        "外部 deepresearch rollout 超时",
+                        {
+                            "last_rollout_idx": rollout_idx,
+                            "question": question[:160],
+                        },
+                        "Timeout (>1800s)",
+                    )
                 except Exception as exc:
                     question = task_info["item"].get("question", "")
                     print(f'Task for question "{question}" (Rollout {rollout_idx}) generated an exception: {exc}')
@@ -252,7 +334,21 @@ if __name__ == "__main__":
                     with write_locks[rollout_idx]:
                         with open(output_file, "a", encoding="utf-8") as f:
                             f.write(json.dumps(error_result, ensure_ascii=False) + "\n")
+                    write_status(
+                        "failed",
+                        "外部 deepresearch rollout 执行异常",
+                        {
+                            "last_rollout_idx": rollout_idx,
+                            "question": question[:160],
+                        },
+                        str(exc),
+                    )
 
         print("\nAll tasks completed!")
+        write_status(
+            "completed",
+            "外部 deepresearch 已完成全部 rollouts",
+            {"total_tasks": len(tasks_to_run_all)},
+        )
 
     print(f"\nAll {roll_out_count} rollouts completed!")
