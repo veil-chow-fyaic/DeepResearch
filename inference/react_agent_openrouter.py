@@ -20,6 +20,9 @@ from tool_search import Search
 from tool_visit import Visit
 
 MAX_LLM_CALL_PER_RUN = int(os.getenv('MAX_LLM_CALL_PER_RUN', 100))
+OPENROUTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "45"))
+OPENROUTER_MAX_TRIES = int(os.getenv("OPENROUTER_MAX_TRIES", "2"))
+OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS = int(os.getenv("OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS", "2"))
 
 ENABLE_PYTHON_INTERPRETER = os.getenv("ENABLE_PYTHON_INTERPRETER", "").strip().lower() in {"1", "true", "yes"}
 KEEP_FULL_MESSAGES = os.getenv("DEEP_RESEARCH_KEEP_MESSAGES", "").strip().lower() in {"1", "true", "yes"}
@@ -68,16 +71,17 @@ class OpenRouterReactAgent:
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=600.0,
+            timeout=OPENROUTER_REQUEST_TIMEOUT_SECONDS,
         )
         print(f"Initialized OpenRouter client with model: {self.model}")
 
     def call_server(self, msgs, max_tries=10):
         """调用 OpenRouter API"""
         base_sleep_time = 1
-        for attempt in range(max_tries):
+        effective_max_tries = OPENROUTER_MAX_TRIES
+        for attempt in range(effective_max_tries):
             try:
-                print(f"--- Attempt {attempt + 1}/{max_tries} ---")
+                print(f"--- Attempt {attempt + 1}/{effective_max_tries} ---")
 
                 chat_response = self.client.chat.completions.create(
                     model=self.model,
@@ -108,12 +112,12 @@ class OpenRouterReactAgent:
             except Exception as e:
                 print(f"Unexpected error on attempt {attempt + 1}: {e}")
 
-            if attempt < max_tries - 1:
+            if attempt < effective_max_tries - 1:
                 sleep_time = min(base_sleep_time * (2 ** attempt) + random.uniform(0, 1), 30)
                 print(f"Retrying in {sleep_time:.2f}s...")
                 time.sleep(sleep_time)
 
-        return "Server error: All retries exhausted"
+        return "[llm_error] upstream llm call failed after retries"
 
     def custom_call_tool(self, tool_name: str, tool_args: dict, **kwargs):
         """调用工具"""
@@ -182,6 +186,7 @@ class OpenRouterReactAgent:
 
         num_llm_calls_available = MAX_LLM_CALL_PER_RUN
         round_num = 0
+        consecutive_llm_failures = 0
 
         while num_llm_calls_available > 0:
             # 超时检查
@@ -191,6 +196,12 @@ class OpenRouterReactAgent:
             round_num += 1
             num_llm_calls_available -= 1
             content = self.call_server(messages)
+            if content.startswith("[llm_error]"):
+                consecutive_llm_failures += 1
+                if consecutive_llm_failures >= OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS:
+                    return self._build_result(question, answer, messages, "No answer found.", "llm_error")
+            else:
+                consecutive_llm_failures = 0
 
             print(f'Round {round_num}: {content[:500]}...' if len(content) > 500 else f'Round {round_num}: {content}')
 

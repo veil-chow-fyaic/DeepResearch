@@ -65,6 +65,11 @@ def today_date():
     return datetime.date.today().strftime("%Y-%m-%d")
 
 
+OPENROUTER_REQUEST_TIMEOUT_SECONDS = float(os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS", "45"))
+OPENROUTER_MAX_TRIES = int(os.getenv("OPENROUTER_MAX_TRIES", "2"))
+OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS = int(os.getenv("OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS", "2"))
+
+
 def build_research_config(generate_cfg: Dict) -> Dict:
     return {
         "min_rounds": int(generate_cfg.get("min_rounds", os.getenv("DEEP_RESEARCH_MIN_ROUNDS", 8))),
@@ -95,6 +100,7 @@ class MultiTurnReactAgent(FnCallAgent):
         openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         openrouter_api_base = os.getenv("OPENROUTER_BASE_URL", "").strip()
         use_openrouter = bool(openrouter_api_key and openrouter_api_base)
+        effective_max_tries = OPENROUTER_MAX_TRIES if use_openrouter else max_tries
 
         openai_api_key = openrouter_api_key if use_openrouter else "EMPTY"
         openai_api_base = openrouter_api_base if use_openrouter else f"http://127.0.0.1:{planning_port}/v1"
@@ -102,13 +108,13 @@ class MultiTurnReactAgent(FnCallAgent):
         client = OpenAI(
             api_key=openai_api_key,
             base_url=openai_api_base,
-            timeout=600.0,
+            timeout=OPENROUTER_REQUEST_TIMEOUT_SECONDS if use_openrouter else 600.0,
         )
 
         base_sleep_time = 1 
-        for attempt in range(max_tries):
+        for attempt in range(effective_max_tries):
             try:
-                print(f"--- Attempting to call the service, try {attempt + 1}/{max_tries} ---")
+                print(f"--- Attempting to call the service, try {attempt + 1}/{effective_max_tries} ---")
                 chat_response = client.chat.completions.create(
                     model=self.model,
                     messages=msgs,
@@ -137,7 +143,7 @@ class MultiTurnReactAgent(FnCallAgent):
             except Exception as e:
                 print(f"Error: Attempt {attempt + 1} failed with an unexpected error: {e}")
 
-            if attempt < max_tries - 1:
+            if attempt < effective_max_tries - 1:
                 sleep_time = base_sleep_time * (2 ** attempt) + random.uniform(0, 1)
                 sleep_time = min(sleep_time, 30) 
                 
@@ -145,8 +151,8 @@ class MultiTurnReactAgent(FnCallAgent):
                 time.sleep(sleep_time)
             else:
                 print("Error: All retry attempts have been exhausted. The call has failed.")
-        
-        return f"vllm server error!!!"
+
+        return "[llm_error] upstream llm call failed after retries"
 
     def count_tokens(self, messages):
         if self.llm_local_path and os.path.exists(self.llm_local_path):
@@ -288,6 +294,7 @@ class MultiTurnReactAgent(FnCallAgent):
         num_llm_calls_available = MAX_LLM_CALL_PER_RUN
         round = 0
         research_state = self.build_research_state()
+        consecutive_llm_failures = 0
         while num_llm_calls_available > 0:
             # Check whether time is reached
             if time.time() - start_time > self.research_config["max_minutes"] * 60:
@@ -298,6 +305,14 @@ class MultiTurnReactAgent(FnCallAgent):
             research_state["rounds"] = round
             num_llm_calls_available -= 1
             content = self.call_server(messages, planning_port)
+            if content.startswith("[llm_error]"):
+                consecutive_llm_failures += 1
+                if consecutive_llm_failures >= OPENROUTER_MAX_EMPTY_OR_ERROR_ROUNDS:
+                    prediction = "No answer found."
+                    termination = "llm_error"
+                    return self._build_result(question, answer, messages, prediction, termination, research_state)
+            else:
+                consecutive_llm_failures = 0
             print(f'Round {round}: {content}')
             if '<tool_response>' in content:
                 pos = content.find('<tool_response>')
